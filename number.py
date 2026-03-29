@@ -7,7 +7,6 @@ from datetime import datetime
 # --- কনফিগারেশন ---
 API_TOKEN = '8749315873:AAF3S4bgWFq19TCIXBAwH1x-rX5oYjM9pSE'
 #   MongoDB Connection String  
-MONGO_URL = "mongodb+srv://robiul159358:robiul159358@cluster0.6vuiitm.mongodb.net/?appName=Cluster0"
 ADMIN_ID = 6864515052
 CHANNEL_ID = '@hiddenearningidea' 
 CHANNEL_LINK = 'https://t.me/hiddenearningidea'
