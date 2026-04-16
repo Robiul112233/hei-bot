@@ -121,6 +121,14 @@ def admin_delete_service(call):
     )
     bot.edit_message_text("🗑 **কোন সার্ভিস থেকে নম্বর মুছবেন?**", call.message.chat.id, call.message.message_id, reply_markup=markup, parse_mode="Markdown")
 
+@bot.callback_query_handler(func=lambda call: call.data == "admin_broadcast")
+def admin_broadcast_step(call):
+    if call.from_user.id != ADMIN_ID: return
+    user_states[ADMIN_ID] = {'step': 'waiting_broadcast'}
+    bot.edit_message_text("📢 **ব্রডকাস্ট মেসেজটি লিখুন:**\n\n(আপনি যা লিখবেন তা সকল ইউজারের কাছে চলে যাবে।)", 
+                          call.message.chat.id, call.message.message_id, parse_mode="Markdown")
+
+
 @bot.callback_query_handler(func=lambda call: call.data.startswith("adm_del_srv_"))
 def admin_delete_country_list(call):
     service = call.data.split("_")[3]
