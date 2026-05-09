@@ -1,393 +1,430 @@
 import telebot
 import sqlite3
+import pandas as pd
+import io
 import time
-import os
 from telebot import types
-from datetime import datetime
-from dotenv import load_dotenv
 
-# ====================== CONFIG ======================
-load_dotenv()
-API_TOKEN = os.getenv('API_TOKEN', '8749315873:AAF3S4bgWFq19TCIXBAwH1x-rX5oYjM9pSE')
-ADMIN_ID = 6864515052
-CHANNEL_ID = '@hiddenearningidea'
-CHANNEL_LINK = 'https://t.me/mrsotpgroup'
-OTP_GROUP_ID = -1003717990729
+# --- কনফিগারেশন ---
+API_TOKEN = '8630229964:AAHD_-5i34IQyZlUr4CCqQnRBiNZ-V4Njw0'
+ADMIN_IDS = [6864515052, 8705862954]
+DB_FILE = "bot_database.db"
 
 bot = telebot.TeleBot(API_TOKEN)
-user_states = {}
-user_cooldowns = {}
-change_num_cooldowns = {}
 
-# ====================== DATABASE ======================
-def get_db_connection():
-    return sqlite3.connect('numbers_bot.db', check_same_thread=False, timeout=30)
 
+user_cooldown = {}
+
+# --- ডাটাবেস সেটআপ ---
 def init_db():
-    with get_db_connection() as conn:
-        cursor = conn.cursor()
-        cursor.execute('''CREATE TABLE IF NOT EXISTS stock
-                          (id INTEGER PRIMARY KEY, service TEXT, country TEXT, phone_number TEXT, status TEXT)''')
-        cursor.execute('''CREATE TABLE IF NOT EXISTS users
-                          (user_id INTEGER PRIMARY KEY, join_date TEXT, total_bought INTEGER DEFAULT 0)''')
-        cursor.execute('''CREATE TABLE IF NOT EXISTS sales
-                          (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER,
-                           service TEXT, country TEXT, phone_number TEXT, sale_time REAL)''')
-        conn.commit()
+    conn = sqlite3.connect(DB_FILE)
+    cursor = conn.cursor()
+    cursor.execute('''CREATE TABLE IF NOT EXISTS services (id INTEGER PRIMARY KEY, name TEXT UNIQUE)''')
+    cursor.execute('''CREATE TABLE IF NOT EXISTS numbers (
+                        id INTEGER PRIMARY KEY, 
+                        service_name TEXT, 
+                        country TEXT, 
+                        value TEXT)''')
+    # নতুন লাইন: ইউজার আইডি সেভ করার জন্য
+    cursor.execute('''CREATE TABLE IF NOT EXISTS users (user_id INTEGER PRIMARY KEY)''')
+    conn.commit()
+    conn.close()
 
-# ====================== HELPERS ======================
-def is_subscribed(user_id):
-    try:
-        status = bot.get_chat_member(CHANNEL_ID, user_id).status
-        return status in ['member', 'administrator', 'creator']
-    except:
-        return False
 
-def check_cooldown(user_id, cooldown_seconds=25):
-    now = time.time()
-    if user_id in user_cooldowns and now - user_cooldowns[user_id] < cooldown_seconds:
-        return False
-    user_cooldowns[user_id] = now
-    return True
+# এডমিনের ডেটা সাময়িকভাবে রাখার জন্য ডিকশনারি
+admin_data = {}
 
-def get_available_services():
-    with get_db_connection() as conn:
-        cursor = conn.cursor()
-        cursor.execute("SELECT DISTINCT service FROM stock WHERE status='Available'")
-        return [row[0] for row in cursor.fetchall()]
-
-def get_available_countries_for_service(service):
-    with get_db_connection() as conn:
-        cursor = conn.cursor()
-        cursor.execute("SELECT DISTINCT country FROM stock WHERE service=? AND status='Available'", (service,))
-        return [row[0] for row in cursor.fetchall()]
-
-# ====================== OTP FORWARDING ======================
-@bot.message_handler(func=lambda m: m.chat.id == OTP_GROUP_ID)
-def handle_incoming_group_otp(message):
-    if not message.text: return
-    otp_text = message.text.lower().strip()
-    now = time.time()
+# --- কিবোর্ডস ---
+def main_menu(user_id):
+    markup = types.ReplyKeyboardMarkup(resize_keyboard=True)
+    markup.row('📱 Get Number', '🆘 Support')
     
-    with get_db_connection() as conn:
-        conn.execute("DELETE FROM sales WHERE (? - sale_time) > 600", (now,))
-        active_sales = conn.execute("SELECT user_id, phone_number, service FROM sales ORDER BY sale_time DESC").fetchall()
-
-    for user_id, full_phone, service in active_sales:
-        phone_str = str(full_phone).strip()
-        phone_clean = phone_str.replace("+", "").replace(" ", "").replace("-", "")
-        if (phone_str in otp_text or phone_clean in otp_text or 
-            (len(phone_clean) >= 4 and phone_clean[-4:] in otp_text)):
-            try:
-                msg = (f"🔔 𝗡𝗘𝗪 𝗢𝗧𝗣 𝗥𝗘𝗦𝗘𝗜𝗩𝗘\n━━━━━━━━━━━━━━━━━━━━\n"
-                       f"📱 𝗡: `{phone_str}`\n🔹\n`{message.text}`")
-                bot.send_message(user_id, msg, parse_mode="Markdown")
-                break
-            except: pass
-
-# ====================== ADMIN PANEL ======================
-def get_analytics():
-    with get_db_connection() as conn:
-        u = conn.execute("SELECT COUNT(*) FROM users").fetchone()[0]
-        s = conn.execute("SELECT COUNT(*) FROM sales").fetchone()[0]
-        top = conn.execute("SELECT country, COUNT(*) as cnt FROM sales GROUP BY country ORDER BY cnt DESC LIMIT 1").fetchone()
-        return u, s, (top[0] if top else "N/A")
-
-@bot.message_handler(commands=['admin'])
-def admin_panel(message):
-    if message.from_user.id != ADMIN_ID: return
-    u, s, c = get_analytics()
-    report = (f"📊 **ADMIN DASHBOARD**\n━━━━━━━━━━━━━━━━━━━━\n"
-              f"👥 মোট ইউজার: `{u}`\n📱 মোট সেল: `{s}`\n🌍 টপ দেশ: `{c}`\n━━━━━━━━━━━━━━━━━━━━")
-    markup = types.InlineKeyboardMarkup(row_width=2)
-    markup.add(
-        types.InlineKeyboardButton("➕ Add Stock", callback_data="admin_add"),
-        types.InlineKeyboardButton("🗑 Delete Stock", callback_data="admin_delete"),
-        types.InlineKeyboardButton("📊 View Stock", callback_data="admin_stock"),
-        types.InlineKeyboardButton("📢 Broadcast", callback_data="admin_broadcast")
-    )
-    bot.send_message(message.chat.id, report, reply_markup=markup, parse_mode="Markdown")
-
-# --- ADMIN CALLBACKS (ORDER MATTERS) ---
-
-@bot.callback_query_handler(func=lambda call: call.data == "admin_delete")
-def admin_delete_service(call):
-    markup = types.InlineKeyboardMarkup(row_width=3)
-    markup.add(
-        types.InlineKeyboardButton("🔵 FB", callback_data="adm_del_srv_FB"),
-        types.InlineKeyboardButton("✈️ TG", callback_data="adm_del_srv_TG"),
-        types.InlineKeyboardButton("🟢 WA", callback_data="adm_del_srv_WA"),
-        types.InlineKeyboardButton("🔙 Back", callback_data="admin_back_to_panel")
-    )
-    bot.edit_message_text("🗑 **কোন সার্ভিস থেকে নম্বর মুছবেন?**", call.message.chat.id, call.message.message_id, reply_markup=markup, parse_mode="Markdown")
-
-@bot.callback_query_handler(func=lambda call: call.data == "admin_broadcast")
-def admin_broadcast_step(call):
-    if call.from_user.id != ADMIN_ID: return
-    user_states[ADMIN_ID] = {'step': 'waiting_broadcast'}
-    bot.edit_message_text("📢 **ব্রডকাস্ট মেসেজটি লিখুন:**\n\n(আপনি যা লিখবেন তা সকল ইউজারের কাছে চলে যাবে।)", 
-                          call.message.chat.id, call.message.message_id, parse_mode="Markdown")
+    # আইডিটি এডমিন লিস্টে আছে কি না চেক
+    if user_id in ADMIN_IDS:
+        markup.row('⚙️ Admin Control')
+    return markup
 
 
-@bot.callback_query_handler(func=lambda call: call.data.startswith("adm_del_srv_"))
-def admin_delete_country_list(call):
-    service = call.data.split("_")[3]
-    countries = get_available_countries_for_service(service)
-    if not countries:
-        bot.answer_callback_query(call.id, "❌ এই সার্ভিসে কোনো নম্বর নেই!", show_alert=True)
-        return
-    markup = types.InlineKeyboardMarkup(row_width=2)
-    for c in countries:
-        markup.add(types.InlineKeyboardButton(f"🗑 {c}", callback_data=f"fdel_{service}_{c}"))
-    markup.add(types.InlineKeyboardButton("🔙 Back", callback_data="admin_delete"))
-    bot.edit_message_text(f"🗑 **{service} - কোন দেশের সব নম্বর মুছবেন?**", call.message.chat.id, call.message.message_id, reply_markup=markup, parse_mode="Markdown")
+def cancel_menu():
+    markup = types.ReplyKeyboardMarkup(resize_keyboard=True, one_time_keyboard=True)
+    markup.add('❌ Cancel')
+    return markup
 
-@bot.callback_query_handler(func=lambda call: call.data.startswith("fdel_"))
-def final_delete_stock(call):
-    _, service, country = call.data.split("_")
-    with get_db_connection() as conn:
-        conn.execute("DELETE FROM stock WHERE service=? AND country=? AND status='Available'", (service, country))
-        conn.commit()
-    bot.answer_callback_query(call.id, f"✅ {country} ({service}) মুছে ফেলা হয়েছে!", show_alert=True)
-    admin_panel(call.message)
-    bot.delete_message(call.message.chat.id, call.message.message_id)
 
-@bot.callback_query_handler(func=lambda call: call.data == "admin_back_to_panel")
-def back_to_admin(call):
-    bot.delete_message(call.message.chat.id, call.message.message_id)
-    admin_panel(call.message)
-
-# অন্যান্য অ্যাডমিন কলব্যাক
-@bot.callback_query_handler(func=lambda call: call.data.startswith("admin_"))
-def admin_general_callbacks(call):
-    if call.data == "admin_add":
-        markup = types.InlineKeyboardMarkup()
-        markup.add(types.InlineKeyboardButton("FB", callback_data="adm_srv_FB"),
-                   types.InlineKeyboardButton("TG", callback_data="adm_srv_TG"),
-                   types.InlineKeyboardButton("WA", callback_data="adm_srv_WA"))
-        bot.edit_message_text("কোন সার্ভিসে নম্বর যোগ করবেন?", call.message.chat.id, call.message.message_id, reply_markup=markup)
-    elif call.data == "admin_stock":
-        with get_db_connection() as conn:
-            # সার্ভিস এবং কান্ট্রি অনুযায়ী স্টক গণনা করা
-            query = """
-                SELECT service, country, COUNT(*) 
-                FROM stock 
-                WHERE status='Available' 
-                GROUP BY service, country 
-                ORDER BY service ASC
-            """
-            rows = conn.execute(query).fetchall()
-
-        if not rows:
-            bot.send_message(call.message.chat.id, "❌ **স্টক বর্তমানে সম্পূর্ণ খালি!**")
-            return
-
-        # মেসেজ ফরম্যাটিং
-        msg = "📂 **বিস্তারিত বর্তমান স্টক রিপোর্ট**\n"
-        msg += "━━━━━━━━━━━━━━━━━━━━\n"
-        
-        current_service = ""
-        total_in_bot = 0
-        
-        service_icons = {"FB": "🔶", "TG": "✈️", "WA": "🟢"}
-        
-        for srv, cntry, count in rows:
-            icon = service_icons.get(srv, "🔹")
-            
-            # সার্ভিস হেডার তৈরি (যদি নতুন সার্ভিস শুরু হয়)
-            if srv != current_service:
-                msg += f"\n{icon} **{srv} SERVICES:**\n"
-                current_service = srv
-            
-            msg += f"   ├── {cntry}: `{count}` টি\n"
-            total_in_bot += count
-            
-        msg += "━━━━━━━━━━━━━━━━━━━━\n"
-        msg += f"📊 **সর্বমোট নম্বর এভেলেবল:** `{total_in_bot}` টি\n"
-        msg += f"⏰ আপডেট টাইম: {datetime.now().strftime('%H:%M:%S')}"
-
-        # ইনলাইন বাটন (Refresh করার জন্য)
-        markup = types.InlineKeyboardMarkup()
-        markup.add(types.InlineKeyboardButton("🔄 Refresh Stock", callback_data="admin_stock"))
-        markup.add(types.InlineKeyboardButton("🔙 Back to Admin", callback_data="admin_back_to_panel"))
-
-        bot.edit_message_text(msg, call.message.chat.id, call.message.message_id, reply_markup=markup, parse_mode="Markdown")
-# ====================== USER ACTIONS ======================
-@bot.message_handler(func=lambda m: m.text == "📱 Get Numbers")
-def show_services_btn(message):
-    show_services(message)
-
-def show_services(message):
-    if not is_subscribed(message.from_user.id):
-        start(message)
-        return
-    available_services = get_available_services()
-    if not available_services:
-        bot.send_message(message.chat.id, "😔 𝗦𝗧𝗢𝗖𝗞 𝗢𝗨𝗧")
-        return
-    markup = types.InlineKeyboardMarkup(row_width=2)
-    service_names = {"FB": "🔶 𝗙𝗔𝗖𝗘𝗕𝗢𝗢𝗞", "TG": "✈️ 𝗧𝗘𝗟𝗘𝗚𝗥𝗔𝗠", "WA": "🟢 𝗪𝗛𝗔𝗧𝗦𝗔𝗣𝗣"}
-    for srv in available_services:
-        markup.add(types.InlineKeyboardButton(service_names.get(srv, srv), callback_data=f"select_srv_{srv}"))
-    bot.send_message(message.chat.id, "🌍 𝗦𝗘𝗟𝗘𝗖𝗧 𝗦𝗘𝗥𝗩𝗜𝗖𝗘", reply_markup=markup, parse_mode="Markdown")
-
-@bot.callback_query_handler(func=lambda call: call.data.startswith("select_srv_"))
-def user_select_srv(call):
-    service = call.data.split("_")[2]
-    countries = get_available_countries_for_service(service)
-    if not countries:
-        bot.answer_callback_query(call.id, "𝗦𝗧𝗢𝗖𝗞 𝗢𝗨𝗧", show_alert=True)
-        return
-    markup = types.InlineKeyboardMarkup(row_width=2)
-    for c in countries:
-        markup.add(types.InlineKeyboardButton(c, callback_data=f"buy_{service}_{c}"))
-    bot.edit_message_text(f"📍 **{service}** 𝗦𝗘𝗟𝗘𝗖𝗧 𝗖𝗢𝗨𝗡𝗧𝗥𝗬", call.message.chat.id, call.message.message_id, reply_markup=markup)
-
-@bot.callback_query_handler(func=lambda call: call.data.startswith("buy_"))
-def final_buy_number(call):
-    user_id = call.from_user.id
-    now = time.time()
-
-    # কুলডাউন চেক (৫ সেকেন্ড)
-    if user_id in change_num_cooldowns and now - change_num_cooldowns[user_id] < 7:
-        bot.answer_callback_query(call.id, "⏳ 7 সেকেন্ড অপেক্ষা করুন!", show_alert=True)
-        return
-
-    # কলব্যাক ডেটা থেকে সার্ভিস এবং দেশ আলাদা করা
-    try:
-        _, service, country = call.data.split("_")
-    except ValueError:
-        bot.answer_callback_query(call.id, "❌ ডেটা ফরম্যাট ভুল!", show_alert=True)
-        return
-
-    with get_db_connection() as conn:
-        cursor = conn.cursor()
-        # স্টক চেক (২টি নম্বর)
-        cursor.execute("SELECT id, phone_number FROM stock WHERE service=? AND country=? AND status='Available' LIMIT 2", 
-                       (service, country))
-        rows = cursor.fetchall()
-
-        if not rows:
-            bot.answer_callback_query(call.id, "😔 𝗦𝗧𝗢𝗖𝗞 𝗢𝗨𝗧", show_alert=True)
-            return
-
-        numbers_display = ""
-        for num_id, phone in rows:
-            # স্ট্যাটাস আপডেট
-            cursor.execute("UPDATE stock SET status='Sold' WHERE id=?", (num_id,))
-            # সেলস টেবিলে ইনসার্ট (OTP Forwarding এর জন্য জরুরি)
-            cursor.execute("INSERT INTO sales (user_id, service, country, phone_number, sale_time) VALUES (?, ?, ?, ?, ?)",
-                           (user_id, service, country, phone, now))
-            numbers_display += f"📱 𝗡: `{phone}`\n"
-
-        # ইউজারের টোটাল কেনাকাটা আপডেট
-        cursor.execute("UPDATE users SET total_bought = total_bought + ? WHERE user_id=?", (len(rows), user_id))
-        conn.commit()
-
-    # কুলডাউন সেট করা
-    change_num_cooldowns[user_id] = now
-
-    # বাটনগুলো তৈরি
-    markup = types.InlineKeyboardMarkup(row_width=2)
-    markup.add(
-        types.InlineKeyboardButton("🔄 𝐂𝐇𝐀𝐍𝐆𝐄", callback_data=f"buy_{service}_{country}"),
-        types.InlineKeyboardButton("🔔 𝐎𝐓𝐏 𝐆𝐑𝐎𝐔𝐏", url=CHANNEL_LINK)
-    )
-    markup.add(types.InlineKeyboardButton("🔙 Back to Services", callback_data=f"select_srv_{service}"))
-
-    # প্রিমিয়াম ডিজাইন মেসেজ
-    success_msg = (
-        f"   ✨ 𝗬𝗢𝗨𝗥 𝗡𝗨𝗠𝗕𝗘𝗥 ✨\n"
-        f"━━━━━━━━━━━━━━━━━━━━\n"
-        f"┣ S: `{service}`\n"
-        f"┣ C: `{country.upper()}`\n"
-        f"━━━━━━━━━━━━━━━━━━━━\n"
-        f"{numbers_display}"
-        f"━━━━━━━━━━━━━━━━━━━━\n"
-        f"💡 𝖶𝖺𝗂𝗍𝗂𝗇𝗀 𝖥𝗈𝗋 𝖮tp.............."
-    )
-
-    try:
-        bot.edit_message_text(
-            success_msg, 
-            call.message.chat.id, 
-            call.message.message_id, 
-            reply_markup=markup, 
-            parse_mode="Markdown"
-        )
-    except Exception as e:
-        # যদি কোনো কারণে মেসেজ এডিট না হয় (যেমন একই মেসেজ বারবার এডিট করা)
-        print(f"Edit error: {e}")
-# ====================== HANDLERS ======================
+# --- কমান্ড হ্যান্ডলার ---
 @bot.message_handler(commands=['start'])
-def start(message):
-    with get_db_connection() as conn:
-        conn.execute("INSERT OR IGNORE INTO users (user_id, join_date) VALUES (?, ?)", (message.from_user.id, datetime.now().strftime('%Y-%m-%d')))
-        conn.commit()
-    if is_subscribed(message.from_user.id):
-        markup = types.ReplyKeyboardMarkup(resize_keyboard=True, row_width=2)
-        markup.add("📱 Get Numbers", "👤 My Profile")
-        bot.send_message(message.chat.id, "✨ 𝗪𝗘𝗟𝗟𝗖𝗢𝗠𝗘> 𝗠𝗥𝗦 𝗕𝗢𝗧", reply_markup=markup)
+def send_welcome(message):
+    # ইউজার আইডি ডাটাবেসে সেভ করা
+    conn = sqlite3.connect(DB_FILE); c = conn.cursor()
+    c.execute("INSERT OR IGNORE INTO users (user_id) VALUES (?)", (message.from_user.id,))
+    conn.commit(); conn.close()
+    
+    bot.send_message(message.chat.id, "বটে স্বাগতম!", reply_markup=main_menu(message.from_user.id))
+
+
+# --- ইউজার সেকশন (Get Number) ---
+@bot.message_handler(func=lambda message: message.text == '📱 Get Number')
+def user_get_number(message):
+    conn = sqlite3.connect(DB_FILE)
+    cursor = conn.cursor()
+    # শুধুমাত্র যে সার্ভিসে নম্বর আছে সেগুলো দেখাবে
+    cursor.execute("SELECT DISTINCT service_name FROM numbers")
+    services = [row[0] for row in cursor.fetchall()]
+    conn.close()
+
+    if not services:
+        bot.reply_to(message, "বর্তমানে কোনো নম্বর এভেলেবল নেই।")
+        return
+
+    markup = types.InlineKeyboardMarkup(row_width=2)
+    for s in services:
+        markup.add(types.InlineKeyboardButton(s, callback_data=f"u_serv_{s}"))
+    bot.send_message(message.chat.id, "সার্ভিস বেছে নিন:", reply_markup=markup)
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith('u_serv_'))
+def user_select_country(call):
+    service = call.data.replace("u_serv_", "")
+    conn = sqlite3.connect(DB_FILE); cursor = conn.cursor()
+    cursor.execute("SELECT DISTINCT country FROM numbers WHERE service_name = ?", (service,))
+    countries = [row[0] for row in cursor.fetchall()]
+    conn.close()
+
+    markup = types.InlineKeyboardMarkup(row_width=2)
+    for c in countries:
+        markup.add(types.InlineKeyboardButton(c, callback_data=f"u_get_{service}_{c}"))
+    
+    # ব্যাক বাটন যোগ করা হয়েছে
+    markup.row(types.InlineKeyboardButton("🔙 Back Service", callback_data="back_to_services"))
+    
+    bot.edit_message_text(f"📌 সার্ভিস: {service}\nদেশ বেছে নিন:", call.message.chat.id, call.message.message_id, reply_markup=markup)
+
+
+@bot.callback_query_handler(func=lambda call: call.data == "back_to_services")
+def back_to_services_handler(call):
+    conn = sqlite3.connect(DB_FILE); cursor = conn.cursor()
+    cursor.execute("SELECT DISTINCT service_name FROM numbers")
+    services = [row[0] for row in cursor.fetchall()]
+    conn.close()
+
+    markup = types.InlineKeyboardMarkup(row_width=2)
+    for s in services:
+        markup.add(types.InlineKeyboardButton(s, callback_data=f"u_serv_{s}"))
+    
+    bot.edit_message_text("সার্ভিস বেছে নিন:", call.message.chat.id, call.message.message_id, reply_markup=markup)
+    bot.answer_callback_query(call.id)
+
+
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith('u_get_'))
+def deliver_numbers(call):
+    user_id = call.from_user.id
+    current_time = time.time()
+
+    # ১০ সেকেন্ড কোoldown চেক
+    if user_id in user_cooldown:
+        if current_time - user_cooldown[user_id] < 10:
+            remaining = int(10 - (current_time - user_cooldown[user_id]))
+            bot.answer_callback_query(call.id, f"দয়া করে {remaining} সেকেন্ড অপেক্ষা করুন।", show_alert=True)
+            return
+
+    parts = call.data.split('_')
+    service, country = parts[2], parts[3]
+
+    conn = sqlite3.connect(DB_FILE); cursor = conn.cursor()
+    cursor.execute("SELECT id, value FROM numbers WHERE service_name = ? AND country = ? LIMIT 2", (service, country))
+    rows = cursor.fetchall()
+
+    if len(rows) < 2:
+        bot.answer_callback_query(call.id, f"দুঃখিত, পর্যাপ্ত নম্বর নেই।", show_alert=True)
+        conn.close(); return
+
+    ids = [r[0] for r in rows]; nums = [r[1] for r in rows]
+    cursor.execute(f"DELETE FROM numbers WHERE id IN ({','.join(map(str, ids))})")
+    conn.commit(); conn.close()
+
+    user_cooldown[user_id] = current_time # সময় সেভ
+
+    # বাটন সেটআপ (Change Number-এ u_change_ ডাটা দেওয়া হয়েছে)
+    markup = types.InlineKeyboardMarkup(row_width=2)
+    btn1 = types.InlineKeyboardButton("🔄 Change Number", callback_data=f"u_change_{service}_{country}")
+    btn2 = types.InlineKeyboardButton("👥 OTP Group", url="https://t.me/your_group_link") 
+    btn3 = types.InlineKeyboardButton("🔙 Back Country", callback_data=f"u_serv_{service}")
+    markup.add(btn1, btn2)
+    markup.row(btn3)
+
+    msg_text = (
+        f"✅ **Number Successfully Reserved!**\n"
+        f"🏳️ **Country:** {country}\n"
+        f"📞 **Service:** {service}\n\n"
+        f"**NUM-1:** `{nums[0]}`\n"
+        f"**NUM-2:** `{nums[1]}`\n\n"
+        f"⏳ **Waiting for SMS...**"
+    )
+
+    bot.edit_message_text(msg_text, call.message.chat.id, call.message.message_id, reply_markup=markup, parse_mode="Markdown")
+    bot.answer_callback_query(call.id)
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith('u_change_'))
+def change_number_handler(call):
+    user_id = call.from_user.id
+    current_time = time.time()
+
+    if user_id in user_cooldown:
+        if current_time - user_cooldown[user_id] < 10:
+            remaining = int(10 - (current_time - user_cooldown[user_id]))
+            bot.answer_callback_query(call.id, f"দয়া করে {remaining} সেকেন্ড অপেক্ষা করুন।", show_alert=True)
+            return
+
+    parts = call.data.split('_')
+    service, country = parts[2], parts[3]
+
+    conn = sqlite3.connect(DB_FILE); cursor = conn.cursor()
+    cursor.execute("SELECT id, value FROM numbers WHERE service_name = ? AND country = ? LIMIT 2", (service, country))
+    rows = cursor.fetchall()
+
+    if len(rows) < 2:
+        bot.answer_callback_query(call.id, "দুঃখিত, আর কোনো নতুন নম্বর নেই।", show_alert=True)
+        conn.close(); return
+
+    ids = [r[0] for r in rows]; nums = [r[1] for r in rows]
+    cursor.execute(f"DELETE FROM numbers WHERE id IN ({','.join(map(str, ids))})")
+    conn.commit(); conn.close()
+
+    user_cooldown[user_id] = current_time
+
+    markup = types.InlineKeyboardMarkup(row_width=2)
+    btn1 = types.InlineKeyboardButton("🔄 Change Number", callback_data=f"u_change_{service}_{country}")
+    btn2 = types.InlineKeyboardButton("👥 OTP Group", url="https://t.me/your_group_link")
+    btn3 = types.InlineKeyboardButton("🔙 Back Country", callback_data=f"u_serv_{service}")
+    markup.add(btn1, btn2)
+    markup.row(btn3)
+
+    msg_text = (
+        f"✅ **Number Successfully Changed!**\n"
+        f"🏳️ **Country:** {country}\n"
+        f"📞 **Service:** {service}\n\n"
+        f"**NUM-1:** `{nums[0]}`\n"
+        f"**NUM-2:** `{nums[1]}`\n\n"
+        f"⏳ **Waiting for SMS...**"
+    )
+
+    bot.edit_message_text(msg_text, call.message.chat.id, call.message.message_id, reply_markup=markup, parse_mode="Markdown")
+    bot.answer_callback_query(call.id, "নম্বর পরিবর্তন করা হয়েছে!")
+
+
+
+# সার্ভিস যোগ করা
+@bot.callback_query_handler(func=lambda call: call.data == "add_ser")
+def add_service_start(call):
+    msg = bot.send_message(call.message.chat.id, "নতুন সার্ভিসের নাম লিখুন:", reply_markup=cancel_menu())
+    bot.register_next_step_handler(msg, save_service)
+
+
+def save_service(message):
+    if message.text == '❌ Cancel':
+        bot.send_message(message.chat.id, "❌ অপারেশন বাতিল করা হয়েছে।", reply_markup=main_menu(ADMIN_IDS))
+        return
+
+    name = message.text.strip()
+    try:
+        conn = sqlite3.connect(DB_FILE); c = conn.cursor()
+        c.execute("INSERT INTO services (name) VALUES (?)", (name,))
+        conn.commit(); conn.close()
+        bot.send_message(message.chat.id, f"✅ সার্ভিস '{name}' সেভ হয়েছে।", reply_markup=main_menu(ADMIN_IDS))
+    except:
+        bot.send_message(message.chat.id, "এরর: এই সার্ভিসটি আগে থেকেই আছে।", reply_markup=main_menu(ADMIN_IDS))
+
+
+# নম্বর যোগ করা (ধাপে ধাপে)
+@bot.callback_query_handler(func=lambda call: call.data == "add_num")
+def add_number_start(call):
+    conn = sqlite3.connect(DB_FILE); c = conn.cursor()
+    c.execute("SELECT name FROM services"); services = [row[0] for row in c.fetchall()]
+    conn.close()
+
+    if not services:
+        bot.send_message(call.message.chat.id, "আগে সার্ভিস যোগ করুন।")
+        return
+
+    markup = types.ReplyKeyboardMarkup(resize_keyboard=True, one_time_keyboard=True)
+    for s in services: markup.add(s)
+    msg = bot.send_message(call.message.chat.id, "সার্ভিস সিলেক্ট করুন:", reply_markup=markup)
+    bot.register_next_step_handler(msg, get_country_step)
+
+def get_country_step(message):
+    if message.text == '❌ Cancel':
+        bot.send_message(message.chat.id, "❌ অপারেশন বাতিল করা হয়েছে।", reply_markup=main_menu(ADMIN_IDS))
+        return
+        
+    admin_data[message.from_user.id] = {'service': message.text}
+    msg = bot.send_message(message.chat.id, "দেশের নাম লিখুন:", reply_markup=cancel_menu())
+    bot.register_next_step_handler(msg, get_numbers_step)
+
+
+def get_numbers_step(message):
+    if message.text == '❌ Cancel':
+        bot.send_message(message.chat.id, "❌ অপারেশন বাতিল করা হয়েছে।", reply_markup=main_menu(ADMIN_IDS))
+        return
+
+    admin_data[message.from_user.id]['country'] = message.text
+    msg = bot.send_message(message.chat.id, "এখন নম্বরগুলো দিন বা ফাইল আপলোড করুন:", reply_markup=cancel_menu())
+    bot.register_next_step_handler(msg, final_process_numbers)
+
+
+def final_process_numbers(message):
+    if message.text == '❌ Cancel':
+        bot.send_message(message.chat.id, "❌ বাতিল করা হয়েছে।", reply_markup=main_menu(ADMIN_IDS))
+        return
+    # বাকি আগের প্রসেসিং কোড...
+    user_id = message.from_user.id
+    service = admin_data[user_id]['service']
+    country = admin_data[user_id]['country']
+    new_nums = []
+
+    try:
+        if message.content_type == 'document':
+            file_info = bot.get_file(message.document.file_id)
+            downloaded_file = bot.download_file(file_info.file_path)
+            if message.document.file_name.endswith('.xlsx'):
+                df = pd.read_excel(io.BytesIO(downloaded_file))
+                new_nums = df.iloc[:, 0].astype(str).tolist()
+            else: # txt
+                new_nums = downloaded_file.decode('utf-8').splitlines()
+        elif message.text:
+            new_nums = message.text.splitlines()
+
+        conn = sqlite3.connect(DB_FILE); c = conn.cursor()
+        for n in new_nums:
+            if n.strip():
+                c.execute("INSERT INTO numbers (service_name, country, value) VALUES (?, ?, ?)", (service, country, n.strip()))
+        conn.commit(); conn.close()
+        bot.send_message(message.chat.id, f"✅ সফলভাবে {len(new_nums)}টি নম্বর যোগ করা হয়েছে।", reply_markup=main_menu(ADMIN_IDS))
+    except Exception as e:
+        bot.send_message(message.chat.id, f"ভুল হয়েছে: {e}")
+
+# --- ১. এডমিন কন্ট্রোল মেনু হ্যান্ডলার (রিপ্লাই কিবোর্ড থেকে ইনলাইন মেনু ওপেন করবে) ---
+@bot.message_handler(func=lambda message: message.text == '⚙️ Admin Control' and message.from_user.id in ADMIN_IDS)
+def admin_control_menu(message):
+    markup = types.InlineKeyboardMarkup(row_width=2)
+    btn1 = types.InlineKeyboardButton("➕ Add Service", callback_data="add_ser")
+    btn2 = types.InlineKeyboardButton("🔢 Add Number", callback_data="add_num")
+    btn3 = types.InlineKeyboardButton("📊 View Stock", callback_data="view_stk")
+    btn4 = types.InlineKeyboardButton("🗑 Delete Number", callback_data="adm_del_n")
+    # নতুন ব্রডকাস্ট বাটন
+    btn5 = types.InlineKeyboardButton("📢 Broadcast", callback_data="adm_brd")
+    
+    markup.add(btn1, btn2, btn3, btn4, btn5)
+    bot.send_message(message.chat.id, "🛠 **এডমিন কন্ট্রোল প্যানেল:**", reply_markup=markup, parse_mode="Markdown")
+
+
+# ধাপ ১: ডিলিট করার জন্য সার্ভিস সিলেক্ট
+@bot.callback_query_handler(func=lambda call: call.data == "adm_del_n")
+def delete_number_start(call):
+    conn = sqlite3.connect(DB_FILE); c = conn.cursor()
+    c.execute("SELECT DISTINCT service_name FROM numbers")
+    services = [row[0] for row in c.fetchall()]; conn.close()
+    
+    if not services:
+        bot.answer_callback_query(call.id, "ডিলিট করার মতো কোনো নম্বর নেই।", show_alert=True)
+        return
+
+    markup = types.InlineKeyboardMarkup(row_width=2)
+    for s in services:
+        markup.add(types.InlineKeyboardButton(s, callback_data=f"del_serv_{s}"))
+    markup.row(types.InlineKeyboardButton("❌ Cancel", callback_data="back_to_admin"))
+    
+    bot.edit_message_text("🗑 কোন সার্ভিসের নম্বর ডিলিট করতে চান?", call.message.chat.id, call.message.message_id, reply_markup=markup)
+
+# ধাপ ২: সার্ভিস সিলেক্টের পর কান্ট্রি সিলেক্ট
+@bot.callback_query_handler(func=lambda call: call.data.startswith('del_serv_'))
+def delete_select_country(call):
+    service = call.data.replace("del_serv_", "")
+    conn = sqlite3.connect(DB_FILE); c = conn.cursor()
+    c.execute("SELECT DISTINCT country FROM numbers WHERE service_name = ?", (service,))
+    countries = [row[0] for row in c.fetchall()]; conn.close()
+
+    markup = types.InlineKeyboardMarkup(row_width=2)
+    for c in countries:
+        markup.add(types.InlineKeyboardButton(c, callback_data=f"del_fin_{service}_{c}"))
+    markup.row(types.InlineKeyboardButton("🔙 Back", callback_data="adm_del_n"))
+    
+    bot.edit_message_text(f"🌍 সার্ভিস: {service}\nকোন দেশের নম্বর ডিলিট করবেন?", call.message.chat.id, call.message.message_id, reply_markup=markup)
+
+# ধাপ ৩: কনফার্মেশন এবং ডিলিট অপারেশন
+@bot.callback_query_handler(func=lambda call: call.data.startswith('del_fin_'))
+def delete_confirm(call):
+    parts = call.data.split('_')
+    service, country = parts[2], parts[3]
+    
+    conn = sqlite3.connect(DB_FILE); c = conn.cursor()
+    c.execute("DELETE FROM numbers WHERE service_name = ? AND country = ?", (service, country))
+    deleted_count = c.rowcount
+    conn.commit(); conn.close()
+    
+    bot.answer_callback_query(call.id, f"সফলভাবে {deleted_count}টি নম্বর ডিলিট হয়েছে।", show_alert=True)
+    # কাজ শেষে আবার স্টক দেখাবে
+    view_stock(call)
+
+@bot.callback_query_handler(func=lambda call: call.data == "back_to_admin")
+def back_to_admin_handler(call):
+    # ইনলাইন মেসেজটি ডিলিট করে নতুন করে এডমিন মেনু পাঠাবে
+    bot.delete_message(call.message.chat.id, call.message.message_id)
+    admin_control_menu(call.message)
+
+
+# --- ২. সাপোর্ট বাটন হ্যান্ডলার ---
+@bot.message_handler(func=lambda message: message.text == '🆘 Support')
+def support_message(message):
+    support_text = (
+        "🆘 **সাপোর্ট সেন্টার**\n\n"
+        "আপনার কোনো সমস্যা হলে আমাদের এডমিনের সাথে যোগাযোগ করুন।\n"
+        "এডমিন আইডি: @nrrifat15170"
+    )
+    bot.send_message(message.chat.id, support_text, parse_mode="Markdown")
+
+
+
+@bot.callback_query_handler(func=lambda call: call.data == "view_stk")
+def view_stock(call):
+    conn = sqlite3.connect(DB_FILE); c = conn.cursor()
+    c.execute("SELECT service_name, country, COUNT(*) FROM numbers GROUP BY service_name, country")
+    rows = c.fetchall(); conn.close()
+    
+    res = "📊 **বর্তমান স্টক:**\n"
+    if not rows: res += "খালি।"
     else:
-        markup = types.InlineKeyboardMarkup().add(types.InlineKeyboardButton("📢 Join Channel", url=CHANNEL_LINK))
-        bot.send_message(message.chat.id, "চ্যানেলে জয়েন করে আবার /start দিন।", reply_markup=markup)
+        for r in rows: res += f"- {r[0]} ({r[1]}): {r[2]} টি\n"
+    bot.send_message(call.message.chat.id, res, parse_mode="Markdown")
 
-@bot.message_handler(func=lambda m: m.from_user.id == ADMIN_ID and m.from_user.id in user_states)
-def admin_inputs(message):
-    state = user_states[ADMIN_ID]
-    step = state.get('step')
+@bot.callback_query_handler(func=lambda call: call.data == "adm_brd")
+def broadcast_start(call):
+    msg = bot.send_message(call.message.chat.id, "📢 আপনার মেসেজটি লিখুন যা সকল ইউজারকে পাঠাতে চান:", reply_markup=cancel_menu())
+    bot.register_next_step_handler(msg, send_broadcast_msg)
 
-    if step == 'waiting_country':
-        user_states[ADMIN_ID].update({'country': message.text.strip(), 'step': 'waiting_numbers'})
-        bot.reply_to(message, "📍 এখন নম্বরগুলো পেস্ট করুন (Space দিয়ে দিয়ে):")
+def send_broadcast_msg(message):
+    if message.text == '❌ Cancel':
+        bot.send_message(message.chat.id, "❌ ব্রডকাস্ট বাতিল করা হয়েছে।", reply_markup=main_menu(ADMIN_IDS))
+        return
 
-    elif step == 'waiting_numbers':
-        service = state['service']
-        country = state['country']
-        nums = [n.strip() for n in message.text.split() if n.strip()]
-        
-        with get_db_connection() as conn:
-            for n in nums: 
-                conn.execute("INSERT INTO stock (service, country, phone_number, status) VALUES (?,?,?,'Available')", 
-                             (service, country, n))
-            conn.commit()
-        
-        bot.reply_to(message, f"✅ {len(nums)}টি নম্বর {service} ({country}) এ যোগ হয়েছে!")
-        del user_states[ADMIN_ID]
+    bot.send_message(message.chat.id, "🚀 ব্রডকাস্ট পাঠানো শুরু হচ্ছে...")
+    
+    conn = sqlite3.connect(DB_FILE); c = conn.cursor()
+    c.execute("SELECT user_id FROM users")
+    users = c.fetchall(); conn.close()
+    
+    success = 0; fail = 0
+    for user in users:
+        try:
+            bot.send_message(user[0], message.text)
+            success += 1
+            time.sleep(0.05) # বটের স্প্যাম ফিল্টার এড়াতে ছোট বিরতি
+        except:
+            fail += 1
+            
+    bot.send_message(message.chat.id, f"✅ ব্রডকাস্ট সম্পন্ন!", reply_markup=main_menu(message.from_user.id))
 
-    # ব্রডকাস্ট প্রসেসিং লজিক (এটিই আপনার কোডে মিসিং বা কাজ করছিল না)
-    elif step == 'waiting_broadcast':
-        with get_db_connection() as conn:
-            users = [row[0] for row in conn.execute("SELECT user_id FROM users").fetchall()]
-        
-        bot.reply_to(message, f"📤 ব্রডকাস্ট শুরু হয়েছে... (মোট ইউজার: {len(users)})")
-        
-        success = 0
-        failed = 0
-        for uid in users:
-            try:
-                # মেসেজটি সবাইকে পাঠানো হচ্ছে
-                bot.send_message(uid, message.text, parse_mode="Markdown")
-                success += 1
-                time.sleep(0.05) # রেট লিমিট এড়াতে সামান্য বিরতি
-            except:
-                failed += 1
-                
-        bot.send_message(message.chat.id, f"✅ ব্রডকাস্ট সম্পন্ন!\n\n🚀 সফল: {success}\n❌ ব্যর্থ: {failed}")
-        del user_states[ADMIN_ID]
 
-@bot.callback_query_handler(func=lambda call: call.data.startswith("adm_srv_"))
-def admin_add_srv(call):
-    user_states[ADMIN_ID] = {'service': call.data.split("_")[2], 'step': 'waiting_country'}
-    bot.edit_message_text("📍 এখন দেশের নাম লিখুন:", call.message.chat.id, call.message.message_id)
 
-@bot.message_handler(func=lambda m: m.text == "👤 My Profile")
-def my_profile(message):
-    with get_db_connection() as conn:
-        res = conn.execute("SELECT join_date, total_bought FROM users WHERE user_id=?", (message.from_user.id,)).fetchone()
-    if res: bot.send_message(message.chat.id, f"📅 **জয়েন:** {res[0]}\n🛒 **মোট কেনা:** {res[1]} টি")
-
-if __name__ == "__main__":
+if __name__ == '__main__':
     init_db()
-    print("🚀 HEI BOT V2 - Fixed & Running...")
     bot.infinity_polling()
