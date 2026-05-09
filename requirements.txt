@@ -2,3 +2,4 @@ pyTelegramBotAPI
 pymongo
 dnspython
 python-dotenv
+pandas
