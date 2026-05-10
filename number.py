@@ -147,7 +147,7 @@ def deliver_numbers(call):
     # বাটন সেটআপ (Change Number-এ u_change_ ডাটা দেওয়া হয়েছে)
     markup = types.InlineKeyboardMarkup(row_width=2)
     btn1 = types.InlineKeyboardButton("🔄 Change Number", callback_data=f"u_change_{service}_{country}")
-    btn2 = types.InlineKeyboardButton("👥 OTP Group", url="https://t.me/your_group_link") 
+    btn2 = types.InlineKeyboardButton("👥 OTP Group", url="https://t.me/nrnumberotp") 
     btn3 = types.InlineKeyboardButton("🔙 Back Country", callback_data=f"u_serv_{service}")
     markup.add(btn1, btn2)
     markup.row(btn3)
